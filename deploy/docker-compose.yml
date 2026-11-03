@@ -20,9 +20,11 @@ services:
       - '127.0.0.1:3000:3000'
     volumes:
       - gateway-data:/data
-    # Lets the container reach a Bifrost listening on the host's loopback, so the
-    # upstream hop never leaves the machine. Use http://host.docker.internal:PORT
-    # as the channel base_url; deploy.sh rewrites 127.0.0.1 to this alias.
+    # host.docker.internal resolves to the docker bridge gateway (e.g. 172.17.0.1),
+    # so the container can reach an upstream on the same machine without going out
+    # through the public domain. The upstream must listen on 0.0.0.0 (or on the
+    # bridge address) — a service bound only to 127.0.0.1 is NOT reachable this way.
+    # deploy.sh rewrites a 127.0.0.1 upstream URL to this alias automatically.
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     logging:

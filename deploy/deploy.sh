@@ -546,8 +546,10 @@ bootstrap() {
 
   local setup
   setup=$(api_call GET /api/setup || true)
+  local reused_data=0
   if printf '%s' "$setup" | grep -q '"status":true'; then
     ok "系统已初始化，跳过创建管理员"
+    reused_data=1
   else
     local payload
     payload=$(printf '{"username":"%s","password":"%s","confirmPassword":"%s"}' \
@@ -564,7 +566,19 @@ bootstrap() {
   login=$(api_call POST /api/user/login \
     "$(printf '{"username":"%s","password":"%s"}' "$(json_escape "$ADMIN_USER")" "$(json_escape "$ADMIN_PASS")")")
   TOKEN=$(json_field "$login" access_token)
-  [ -n "$TOKEN" ] || die "登录失败，请检查管理员账号: $login"
+  if [ -z "$TOKEN" ]; then
+    # Almost always a re-run on a machine that still holds the old data volume:
+    # the admin account exists with whatever password the first run used.
+    warn "用 $ADMIN_USER 登不进去。"
+    if [ "$reused_data" = "1" ]; then
+      warn "数据卷 community-gateway-data 里已经有旧数据，旧管理员密码和这次填的不一样。"
+      warn "  · 想沿用旧账号：把 .deploy-config 里的 ADMIN_PASS 改成旧密码，然后重跑 bash deploy.sh"
+      warn "  · 想彻底重来：docker compose -f docker-compose.yml down -v  然后重跑（会清空所有数据）"
+    else
+      warn "管理员账号刚创建，密码应该就是刚才输入的那个；如果反复失败请贴出上面的日志。"
+    fi
+    die "登录失败: $login"
+  fi
   ok "已登录后台"
 
   say "写入站点地址与 Discord 配置"
@@ -649,13 +663,11 @@ export_bundle() {
   # receiving host is only supposed to run the container.
   cp "$HERE/Dockerfile" "$HERE/docker-compose.yml" "$HERE/deploy.sh" "$HERE/README.md" "$staging/"
   cp "$HERE/.env.example" "$staging/.env.example"
-  # Ship the machine-local preset when it exists: the tracked preset.env only
-  # carries placeholders, the real upstream lives in the gitignored local file.
-  if [ -f "$HERE/preset.local.env" ]; then
-    cp "$HERE/preset.local.env" "$staging/preset.env"
-  else
-    cp "$HERE/preset.env" "$staging/preset.env"
-  fi
+  # Always ship the placeholder preset. preset.local.env holds this build
+  # machine's real upstream address and key and must never leave it: the bundle
+  # is published as a public release asset, and the deployer types their own
+  # values into the wizard anyway.
+  cp "$HERE/preset.env" "$staging/preset.env"
   [ -f "$HERE/.dockerignore" ] && cp "$HERE/.dockerignore" "$staging/.dockerignore"
 
   # One binary per architecture: deploy.sh picks the right one at install time.
