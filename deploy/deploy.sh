@@ -143,6 +143,7 @@ ask_secret() {
 # ------------------------------------------------------------ validators ----
 v_site_url() {
   local url="${1%/}" rest
+  case "$url" in *'<'*|*'>'*) echo "这是包里的占位符，请填真实的站点地址（如 https://ai.example.com）"; return 1 ;; esac
   case "$url" in http://*|https://*) ;; *) echo "必须以 http:// 或 https:// 开头"; return 1 ;; esac
   rest="${url#*://}"
   [ -n "$rest" ] || { echo "缺少域名"; return 1; }
@@ -184,6 +185,7 @@ v_password() {
 
 v_upstream_url() {
   local url="${1%/}"
+  case "$url" in *'<'*|*'>'*) echo "这是包里的占位符，请填真实的 Bifrost 地址（同机可填 http://127.0.0.1:8080）"; return 1 ;; esac
   case "$url" in http://*|https://*) ;; *) echo "必须以 http:// 或 https:// 开头"; return 1 ;; esac
   case "$url" in
     */v1|*/v1/) echo "这里只填 Bifrost 根地址，不要带 /v1，网关会自己拼 /v1/chat/completions"; return 1 ;;
@@ -427,7 +429,7 @@ collect() {
   UPSTREAM_BASE_URL="${UPSTREAM_BASE_URL%/}"
   if [ -n "$UPSTREAM_BASE_URL" ]; then
     ask_secret UPSTREAM_API_KEY "Bifrost 密钥（sk-...）" "${UPSTREAM_API_KEY:-}" v_api_key
-    ask_optional UPSTREAM_MODELS "对外暴露的模型名（逗号分隔）" "${UPSTREAM_MODELS:-minimax/abab6.5s-chat}"
+    ask_optional UPSTREAM_MODELS "对外暴露的模型名（逗号分隔，例 Z.ai/glm-5.3-flash,openrouter/minimax/minimax-m3）" "${UPSTREAM_MODELS:-}"
   fi
 
   echo
