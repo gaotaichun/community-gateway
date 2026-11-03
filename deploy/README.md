@@ -1,14 +1,14 @@
 # 社区 AI API 网关 · 部署与使用说明
 
-一个给 Discord 社区用的 API 网关：**只负责「谁有资格用」和「每人能用多少」**，
+一个给 Discord 社区用的 API 网关：**只负责「谁有资格用」和「全站每小时能用多少」**，
 模型路由、上游密钥、模型治理全部交给已有的 Bifrost。
 
 ```
 Discord 用户
    │  ① Discord OAuth2 登录（identify + guilds + guilds.members.read）
    ▼
-本网关（new-api 底座 + 社区门禁 + 三窗口额度）
-   │  ② 校验：是否在该 Discord 服务器 / 三个窗口额度是否还有余量
+本网关（new-api 底座 + 社区门禁 + 两个全站 token 池）
+   │  ② 校验：是否在该 Discord 服务器 / 该模型所属池是否还有余量 / 全站每分钟次数
    ▼
 Bifrost（OpenAI 兼容）  ──►  MiniMax / OpenRouter / …
 ```
@@ -203,23 +203,56 @@ ai.example.com {
 
 普通成员在 `/sign-in` 只会看到 **Continue with Discord** 一个按钮；管理员应急入口是带 `?admin=1` 的地址。
 
-### 5.1 套餐与三窗口额度
+### 5.1 套餐与额度池
 
 后台 → **订阅**（或直接访问 `/my-plan`）→ **Plan administration**：
 
 | 字段 | 含义 |
 |---|---|
-| 5 hours / 7 days / 30 days | 三个独立窗口的额度上限（USD）。**0 表示该窗口不限** |
+| MiniMax pool | MiniMax 系列模型每小时的**全站** token 上限。默认 `30000000`（30M） |
+| GLM pool | GLM 系列模型每小时的**全站** token 上限。默认 `3000000`（3M） |
 | Enabled | 该套餐是否可用 |
 | Grant automatically on first sign-in | 是否作为默认套餐，在新用户首次登录时自动发放 |
-| Clear window usage | 清零该套餐下所有人的窗口用量（排障用） |
+| Clear window usage | 清零两个池的已用量并重置计时（排障 / 活动前重置用） |
 
 要点：
 
-- 三个窗口**同时校验**，任一不足直接拒绝，返回里会写明是哪个窗口、什么时候重置。
-- 窗口是**滚动固定窗口**：从用户第一次消耗开始计时，不是自然日零点。
+- **全站共享，不是每人一份。** 30M 是所有人加起来一小时的总量。
+- **口径是输入 + 输出合计**，跟上游 `usage.total_tokens` 一致，不按美元折算。
+- 两个池**互相独立**：MiniMax 打满不影响 GLM，反之亦然。
+- 窗口是**滚动固定窗口**：从该池第一次被计入开始计时，1 小时后归零，不是整点重置。
+- **0 表示该池不限。** 两个都填 0 = 完全不限。
+- **非 minimax / glm 的模型免费**（比如本地 qwen3-embedding / reranker），不占额度、也不会被额度拦。
 - 新用户首次 Discord 登录自动获得默认套餐；已有账号（含管理员）在无有效订阅时登录也会补发。
 - 签到默认关闭。
+
+### 5.1.1 全站每分钟限流
+
+除了小时额度，还有一道独立的闸：`GLOBAL_RATE_LIMIT_PER_MINUTE`（默认 30，0 = 不限）。
+
+它写在 `.env` 里，不是后台可改项——因为它属于进程级保护，用来防止单个客户端写死循环把 Bifrost 打爆。改了要 `docker compose up -d` 才生效。
+
+```
+GLOBAL_RATE_LIMIT_PER_MINUTE=30
+```
+
+触发时返回 `429`，文案是 `You have reached the request limit: maximum 30 requests in 1 minutes`，与"额度已用完"区分得开。
+
+### 5.1.2 使用规范（发给成员看）
+
+本站是社区公益资源，不是公共 API 服务。两条硬规则：
+
+1. **密钥必须按「软件 + 用途」命名**，例如 `cherry-studio-个人笔记问答`。看不出用途的 key 直接删。
+2. **禁止任何形式的商业化使用**：出售/转售/出租 API 或额度、接入商业平台或付费项目、作为第三方盈利服务的一部分调用、账号共享 / 代用 / 一人多号。
+
+管理员日常要做的两件事：
+
+- 扫 **API Keys**：名字不合规的删掉。
+- 看 **Usage Logs**：单账号用量异常高的，核对是不是在跑商业服务。
+
+完整措辞见 [使用说明书 1.3](../docs/使用说明书.md#13-使用规范必读)。
+
+> **渠道页的「测试」按钮尽量别点。** 每点一次都是真实上游请求，会消耗额度、占用全站每分钟次数，还会往日志里写一条噪声。刚改完配置时点一次确认即可。
 
 ### 5.2 渠道（Bifrost 上游）
 
@@ -310,7 +343,9 @@ bash build.sh --image && docker compose -f docker-compose.yml up -d
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `5 小时额度已用完（已用 x USD / 上限 y USD），将于 … 重置` | 该窗口打满 | 等重置，或后台调高该窗口额度（立即生效） |
+| `MiniMax全站额度已用完（已用 x tokens / 上限 y tokens），将于 … 重置` | 该池这一小时打满 | 等重置，或后台调高该池额度（立即生效）；急用可换另一个池的模型 |
+| `You have reached the request limit: maximum 30 requests in 1 minutes` | 全站每分钟限流触发 | 降低并发；确认 `GLOBAL_RATE_LIMIT_PER_MINUTE` 的值 |
+| 两个额度框都显示「不限」 | 套餐里填了 0 | 后台把 MiniMax / GLM 池填回 30000000 / 3000000 |
 | 三个窗口都显示「不限」 | 额度填了 0 | 0 表示不限，这是预期行为 |
 | 额度改了但请求仍被拒 | 缓存/前端未刷新 | 窗口状态每次请求实时查库，改完立刻生效；页面 30 秒自动刷新 |
 | 用户显示「无有效套餐」 | 没有默认套餐或订阅过期 | 后台把某个套餐勾上 Grant automatically，让用户重新登录 |
@@ -322,7 +357,7 @@ bash build.sh --image && docker compose -f docker-compose.yml up -d
 | 请求返回 502 / 连接超时 | 网关到 Bifrost 不可达 | 容器内 `docker compose exec gateway wget -qO- $UPSTREAM_BASE_URL/models`；需要代理就在 `.env` 里设 `HTTP_PROXY` |
 | 401 / 403 | Bifrost 密钥错误或预算耗尽 | 用同一把密钥在宿主机 `curl -H "Authorization: Bearer sk-bf-..." $BASE/models` 复现 |
 | 404 `model_not_found` | 模型名写错，或 Base URL 带了 `/v1` | 模型名用 `provider/model`；Base URL 只填根地址 |
-| `Model xxx has not been priced by the administrator yet` | 后台没有该模型的倍率 | 后台 → 模型定价，给该模型加倍率（测试可用 `=1`） |
+| `Model xxx has not been priced by the administrator yet` | 自用模式被关掉了（向导默认开启） | 后台 → 运营设置 → 打开 **自用模式**；或给该模型配倍率 |
 
 ### 系统相关
 

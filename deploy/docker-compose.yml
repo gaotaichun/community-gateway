@@ -20,6 +20,11 @@ services:
       - '127.0.0.1:3000:3000'
     volumes:
       - gateway-data:/data
+    # Lets the container reach a Bifrost listening on the host's loopback, so the
+    # upstream hop never leaves the machine. Use http://host.docker.internal:PORT
+    # as the channel base_url; deploy.sh rewrites 127.0.0.1 to this alias.
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
     logging:
       driver: json-file
       options:

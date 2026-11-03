@@ -194,6 +194,10 @@ v_api_key() {
   case "$1" in sk-*) return 0 ;; *) echo "Bifrost 密钥通常以 sk- 开头，请确认没有粘错"; return 1 ;; esac
 }
 
+v_count() {
+  case "$1" in ''|*[!0-9]*) echo "应为非负整数（0 表示不限）"; return 1 ;; esac
+}
+
 # ----------------------------------------------------------------- utils ----
 json_escape() {
   local s=$1
@@ -374,6 +378,7 @@ save_config() {
     printf 'UPSTREAM_API_KEY\t%s\n' "${UPSTREAM_API_KEY:-}"
     printf 'UPSTREAM_MODELS\t%s\n' "${UPSTREAM_MODELS:-}"
     printf 'OUTBOUND_PROXY\t%s\n' "${OUTBOUND_PROXY:-}"
+    printf 'GLOBAL_RATE_LIMIT_PER_MINUTE\t%s\n' "${GLOBAL_RATE_LIMIT_PER_MINUTE:-30}"
     printf 'TZ_VALUE\t%s\n' "${TZ_VALUE:-Asia/Shanghai}"
   } > "$HERE/.deploy-config"
   chmod 600 "$HERE/.deploy-config"
@@ -426,12 +431,31 @@ collect() {
   fi
 
   echo
+  printf '%s额度与限流%s\n' "$C_BOLD" "$C_RESET"
+  printf '%s每小时 token 额度在后台「套餐」里设置（默认 MiniMax 30M / GLM 3M，全站共享）。%s\n' "$C_DIM" "$C_RESET"
+  printf '%s这里只设全站每分钟请求上限，防止有人写死循环把上游打爆。%s\n' "$C_DIM" "$C_RESET"
+  ask_optional GLOBAL_RATE_LIMIT_PER_MINUTE "全站每分钟最多调用次数（0=不限）" "${GLOBAL_RATE_LIMIT_PER_MINUTE:-30}" v_count
+
+  echo
   printf '%s其他%s\n' "$C_BOLD" "$C_RESET"
   ask_optional OUTBOUND_PROXY "容器出网代理（如 http://172.17.0.1:7890，留空=直连）" "${OUTBOUND_PROXY:-}"
   ask_optional TZ_VALUE "时区" "${TZ_VALUE:-Asia/Shanghai}"
 }
 
 # --------------------------------------------------------------- validate ---
+# The gateway runs inside a container, so a loopback upstream address means the
+# container itself, not the host. Rewrite it to the docker host alias (mapped in
+# docker-compose.yml via extra_hosts) before it is written into the channel.
+# Every other address is used verbatim.
+container_url() {
+  local url=$1
+  case "$url" in
+    *//127.0.0.1[:/]*|*//127.0.0.1) printf '%s' "${url/\/\/127.0.0.1/\/\/host.docker.internal}" ;;
+    *//localhost[:/]*|*//localhost) printf '%s' "${url/\/\/localhost/\/\/host.docker.internal}" ;;
+    *) printf '%s' "$url" ;;
+  esac
+}
+
 validate() {
   step "3/6 连通性校验"
 
@@ -486,6 +510,8 @@ write_env() {
     echo "ERROR_LOG_ENABLED=true"
     echo "BATCH_UPDATE_ENABLED=true"
     echo "GIN_MODE=release"
+    echo "# 全站每分钟请求上限（所有用户合计），0 = 不限。"
+    echo "GLOBAL_RATE_LIMIT_PER_MINUTE=${GLOBAL_RATE_LIMIT_PER_MINUTE:-30}"
     if [ -n "${OUTBOUND_PROXY:-}" ]; then
       echo "HTTP_PROXY=${OUTBOUND_PROXY}"
       echo "HTTPS_PROXY=${OUTBOUND_PROXY}"
@@ -547,6 +573,12 @@ bootstrap() {
   set_option discord.required_role_ids "${DISCORD_REQUIRED_ROLE_IDS:-}"
   set_option discord.invite_url "${DISCORD_INVITE_URL:-}"
   set_option checkin_setting.enabled false
+  # Self-use mode: an unpriced model is billed at a fallback ratio instead of
+  # being rejected with "not been priced by the administrator". The gateway
+  # meters tokens per hour, not money, and the model catalogue is owned by
+  # Bifrost — so a model the upstream starts serving must work immediately,
+  # without anyone remembering to add a price here first.
+  set_option SelfUseModeEnabled true
   set_option PasswordLoginEnabled false
   set_option PasswordRegisterEnabled false
   # RegisterEnabled must stay true: the first Discord sign-in creates the account.
@@ -555,13 +587,21 @@ bootstrap() {
 
   if [ -n "${UPSTREAM_BASE_URL:-}" ] && [ -n "${UPSTREAM_API_KEY:-}" ]; then
     say "创建 Bifrost 渠道"
+    local channel_url
+    channel_url=$(container_url "$UPSTREAM_BASE_URL")
     local channel
     channel=$(printf '{"mode":"single","channel":{"name":"bifrost","type":1,"base_url":"%s","key":"%s","models":"%s","group":"default"}}' \
-      "$(json_escape "$UPSTREAM_BASE_URL")" "$(json_escape "$UPSTREAM_API_KEY")" "$(json_escape "${UPSTREAM_MODELS:-}")")
+      "$(json_escape "$channel_url")" "$(json_escape "$UPSTREAM_API_KEY")" "$(json_escape "${UPSTREAM_MODELS:-}")")
     local created_channel
     created_channel=$(api_call POST /api/channel/ "$channel")
     case "$created_channel" in
-      *'"success":true'*) ok "渠道已创建（base_url=${UPSTREAM_BASE_URL}）" ;;
+      *'"success":true'*)
+        if [ "$channel_url" != "$UPSTREAM_BASE_URL" ]; then
+          ok "渠道已创建（base_url=${channel_url}，由 ${UPSTREAM_BASE_URL} 改写而来）"
+        else
+          ok "渠道已创建（base_url=${channel_url}）"
+        fi
+        ;;
       *) warn "渠道创建失败，请稍后在后台手动添加: $created_channel" ;;
     esac
   else
