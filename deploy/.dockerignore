@@ -1,0 +1,12 @@
+# The image only needs bin/new-api (the copy deploy.sh selects). Keeping the
+# per-architecture binaries out of the build context saves ~130 MB per build.
+bin/new-api-*
+
+# Never send configuration or data into the image.
+.env
+.deploy-config
+preset.env
+preset.local.env
+*.db
+*.log
+dist/

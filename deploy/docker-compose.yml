@@ -1,0 +1,31 @@
+# Community gateway — single service, loopback only.
+#
+# The published port is bound to 127.0.0.1 on purpose: the gateway must never be
+# reachable from the public internet directly. Put Cloudflare Tunnel, Caddy,
+# nginx or another TLS terminator in front of it and expose 443 instead.
+name: community-gateway
+
+services:
+  gateway:
+    image: community-gateway:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: community-gateway
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      # Loopback only. Never change this to 0.0.0.0 or "3000:3000".
+      - '127.0.0.1:3000:3000'
+    volumes:
+      - gateway-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: '20m'
+        max-file: '5'
+
+volumes:
+  gateway-data:
+    name: community-gateway-data

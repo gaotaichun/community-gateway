@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+bun.lock
+
+# Build output
+dist/
+bin/
+*.tar.gz
+*.sha256
+
+# Secrets — never commit
+.env
+.deploy-config
+preset.local.env
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local test data
+*.db
+*.db-wal
+*.db-shm
+logs/
+shots/

@@ -1,0 +1,10 @@
+# Secrets and machine-specific artifacts — never commit these.
+.env
+.deploy-config
+preset.local.env
+
+# Build output. The binary is shipped inside the release bundle, not in git.
+bin/
+
+# Local exports
+*.tar.gz
