@@ -1,6 +1,6 @@
 # 社区 AI API 网关 · 部署与使用说明
 
-一个给 Discord 社区用的 API 网关：**只负责「谁有资格用」和「全站每小时能用多少」**，
+一个给 Discord 社区用的 API 网关：**只负责「谁有资格用」和「全站每小时能用多少」**，  
 模型路由、上游密钥、模型治理全部交给已有的 Bifrost。
 
 ```
@@ -30,12 +30,69 @@ Bifrost（OpenAI 兼容）  ──►  MiniMax / OpenRouter / …
 
 ## 一、前置条件
 
+### 服务器
+
+| 需要 | 具体要求 | 备注 |
+|---|---|---|
+| 操作系统 | Linux（Debian / Ubuntu / 任何能跑 Docker 的发行版） | 不需要桌面环境 |
+| 架构 | `x86_64` 或 `ARM64` | 发布包两个架构都带，装的时候自动选 |
+| CPU / 内存 | 1 核 / 1GB 起 | 实测容器常驻内存 **34MB**，1GB 的机器绰绰有余 |
+| 磁盘 | **≥ 2GB 空闲** | 镜像 311MB + 发布包 78MB + 构建缓存 |
+| 端口 | `3000` 空闲 | 只绑 `127.0.0.1`，不对外 |
+| 系统时间 | 与真实时间偏差 < 5 分钟 | `timedatectl` 看一眼；偏差大会让 OAuth / TLS 失败 |
+
+### 软件
+
+| 需要 | 版本 | 检查命令 |
+|---|---|---|
+| Docker Engine | **20.10+**（要用 `host-gateway`） | `docker version` |
+| Docker Compose | **v2**（compose 文件用了顶层 `name:`） | `docker compose version` |
+| curl | 任意 | `curl --version` |
+
+Debian / Ubuntu 一条命令装好：
+
+```bash
+curl -fsSL https://get.docker.com | sh
+```
+
+装完确认：
+
+```bash
+docker version --format '{{.Server.Version}}'
+docker compose version
+```
+
+### 网络
+
+| 方向 | 目标 | 什么时候用 |
+|---|---|---|
+| 出网 | `registry-1.docker.io`、`deb.debian.org` | 构建镜像时拉基础镜像 + `apt-get install` |
+| 出网 | `discord.com:443` | 每次登录：换 token、查成员 |
+| 本机/内网 | Bifrost 的地址与端口 | 每次转发请求 |
+| 入站 | 一个 HTTPS 域名 → `127.0.0.1:3000` | 成员访问 |
+
+> 机器需要走代理才能出网时，向导会问「容器出网代理」，填进去即可。
+> **注意 `NO_PROXY` 要放过 Bifrost 的内网地址**，否则请求会绕到代理上。
+
+### 其它
+
 | 需要 | 说明 |
 |---|---|
-| 一台 Linux 服务器 | 1 核 1G 起，只需装 Docker Engine 与 docker compose v2 |
-| 一个域名 | 必须 HTTPS。Discord 只接受 `https://` 回调（`http://localhost` 例外） |
-| 一个 Discord 服务器 | 社区成员必须都在同一个服务器里；只需要服务器 ID |
-| Bifrost 地址与密钥 | 形如 `https://bifrost.example.com` + `sk-bf-xxx` |
+| 一个 HTTPS 域名 | Discord 只接受 `https://` 回调（`http://localhost` 例外） |
+| 一个 Discord 应用 | 见下一节，需要 Client ID / Secret |
+| Discord 服务器 ID | 社区成员必须都在同一个服务器里 |
+| Bifrost 地址与密钥 | 同机可填 `http://127.0.0.1:<端口>`；密钥形如 `sk-bf-xxx` |
+
+### 不需要准备什么
+
+这些**都不用装**，发布包里全带了：
+
+- ❌ Go、Node.js、bun、任何编译环境 —— 二进制是预编译的，镜像里只有运行时
+- ❌ MySQL / PostgreSQL / Redis —— 数据存 SQLite 单文件，放在 Docker 命名卷里
+- ❌ nginx / Caddy / Apache —— 除非你想用；Cloudflare Tunnel 也可以
+- ❌ 单独申请 TLS 证书 —— 交给隧道或反代终止 TLS
+- ❌ Discord Bot —— 不需要 `bot` scope，也不用把机器人拉进服务器
+- ❌ 公网 IP —— 有 Cloudflare Tunnel 的话，机器在 NAT 后面也能跑
 
 > 网关默认只监听 `127.0.0.1:3000`。公网入口必须由 Cloudflare Tunnel、Caddy 或 nginx 提供。
 
@@ -47,24 +104,18 @@ Bifrost（OpenAI 兼容）  ──►  MiniMax / OpenRouter / …
 2. 左侧 **OAuth2**：
    - 记下 **Client ID** 与 **Client Secret**（点 Reset Secret 才看得到，只显示一次）。
    - **Redirects** 里加入（把域名换成你的）：
-
      ```
      https://ai.example.com/oauth/discord
      ```
-
-     > 这一行必须和网关的「站点地址」完全一致，路径固定是 `/oauth/discord`。
+     > 这一行必须和网关的「站点地址」完全一致，路径固定是 `/oauth/discord`。  
      > 三个地方（Discord 里填的、网关配置的站点地址、浏览器实际访问的域名）差一个字符都会登录失败。
-
    - **Scopes** 勾选三项（网关自己会带上，这里只是让你知道用途）：
-
-     | Scope | 用途 |
-     |---|---|
-     | `identify` | 拿用户 ID、用户名、头像 |
-     | `guilds` | 列出用户所在的服务器 |
+     | Scope                 | 用途                                         |
+     | --------------------- | ------------------------------------------ |
+     | `identify`            | 拿用户 ID、用户名、头像                              |
+     | `guilds`              | 列出用户所在的服务器                                 |
      | `guilds.members.read` | 读用户**自己**在该服务器的成员对象；不是成员会返回 404，这就是门禁的判定依据 |
-
      > 不需要 Bot，不需要 `bot` scope，也不需要把机器人拉进服务器。
-
 3. 不需要在 **Bot** 页面做任何事。
 
 ---
@@ -121,7 +172,7 @@ bash build.sh              # 生成 bin/new-api（linux/amd64）
 bash build.sh --image      # 顺便构建 docker 镜像
 ```
 
-镜像构建本身**不需要 Go**：`Dockerfile` 只 `COPY` 已编译好的 `bin/new-api` 和系统运行库。
+镜像构建本身**不需要 Go**：`Dockerfile` 只 `COPY` 已编译好的 `bin/new-api` 和系统运行库。  
 `build.sh` 不会被打进发布包，它只留在构建机上。
 
 ### 4.2 交互式部署（推荐）
@@ -135,14 +186,14 @@ bash deploy.sh
 
 向导会依次做这些事：
 
-| 步骤 | 内容 |
-|---|---|
-| 1/6 环境检查 | docker / compose / 二进制是否就绪 |
-| 2/6 收集配置 | 站点地址、Discord 凭证、服务器 ID、管理员账号、Bifrost 上游、出网代理 |
-| 3/6 连通性校验 | 探测 Discord API 与 Bifrost `/models`，并把**要填进 Discord 的回调地址**原样打印出来 |
-| 4/6 写入 .env | 生成随机的 `SESSION_SECRET`，文件权限 600 |
-| 5/6 构建并启动 | `docker compose up -d --build`，等 `/api/status` 返回 200 |
-| 6/6 初始化与配置 | 创建管理员 → 登录 → 写入站点地址/Discord/签到关闭等选项 → 创建 Bifrost 渠道 |
+| 步骤          | 内容                                                               |
+| ----------- | ---------------------------------------------------------------- |
+| 1/6 环境检查    | docker / compose / 二进制是否就绪                                       |
+| 2/6 收集配置    | 站点地址、Discord 凭证、服务器 ID、管理员账号、Bifrost 上游、出网代理                     |
+| 3/6 连通性校验   | 探测 Discord API 与 Bifrost `/models`，并把**要填进 Discord 的回调地址**原样打印出来 |
+| 4/6 写入 .env | 生成随机的 `SESSION_SECRET`，文件权限 600                                  |
+| 5/6 构建并启动   | `docker compose up -d --build`，等 `/api/status` 返回 200            |
+| 6/6 初始化与配置  | 创建管理员 → 登录 → 写入站点地址/Discord/签到关闭等选项 → 创建 Bifrost 渠道              |
 
 跑完后会打印站点地址、回调地址、管理后台地址和常用命令。
 
@@ -155,7 +206,7 @@ bash deploy.sh --export /tmp/out
 # → /tmp/out/community-gateway-YYYYMMDD.tar.gz（同时生成 .sha256 校验值）
 ```
 
-默认导出的是**干净包**：只有二进制、Dockerfile、compose、`deploy.sh`、`README.md`、许可证和 `.env.example`，
+默认导出的是**干净包**：只有二进制、Dockerfile、compose、`deploy.sh`、`README.md`、许可证和 `.env.example`，  
 **不含 `.env`、`.deploy-config` 或任何密钥**，也不含 `build.sh`（接收方不需要 Go 和 bun）。
 
 对方拿到包后：
@@ -207,13 +258,13 @@ ai.example.com {
 
 后台 → **订阅**（或直接访问 `/my-plan`）→ **Plan administration**：
 
-| 字段 | 含义 |
-|---|---|
-| MiniMax pool | MiniMax 系列模型每小时的**全站** token 上限。默认 `30000000`（30M） |
-| GLM pool | GLM 系列模型每小时的**全站** token 上限。默认 `3000000`（3M） |
-| Enabled | 该套餐是否可用 |
-| Grant automatically on first sign-in | 是否作为默认套餐，在新用户首次登录时自动发放 |
-| Clear window usage | 清零两个池的已用量并重置计时（排障 / 活动前重置用） |
+| 字段                                   | 含义                                                 |
+| ------------------------------------ | -------------------------------------------------- |
+| MiniMax pool                         | MiniMax 系列模型每小时的**全站** token 上限。默认 `30000000`（30M） |
+| GLM pool                             | GLM 系列模型每小时的**全站** token 上限。默认 `3000000`（3M）       |
+| Enabled                              | 该套餐是否可用                                            |
+| Grant automatically on first sign-in | 是否作为默认套餐，在新用户首次登录时自动发放                             |
+| Clear window usage                   | 清零两个池的已用量并重置计时（排障 / 活动前重置用）                        |
 
 要点：
 
@@ -258,40 +309,40 @@ GLOBAL_RATE_LIMIT_PER_MINUTE=30
 
 向导第 6 步会自动建好，**一般不用手动动**。要改就：后台 → **渠道** → 编辑。
 
-| 字段 | 填什么 |
-|---|---|
-| 类型 | OpenAI |
+| 字段       | 填什么                                                |
+| -------- | -------------------------------------------------- |
+| 类型       | OpenAI                                             |
 | Base URL | Bifrost **根地址**，例如 `https://<域名>` —— **不要带 `/v1`** |
-| 密钥 | `sk-bf-xxx` |
-| 模型 | 逗号分隔，不能有空格，见下表 |
+| 密钥       | `sk-bf-xxx`                                        |
+| 模型       | 逗号分隔，不能有空格，见下表                                     |
 
 > Base URL 填了 `/v1` 会变成 `/v1/v1/chat/completions`，表现为 404。
 
 本站上游当前登记的模型（全部由同一个 Bifrost 出口提供，所以一个渠道就够）：
 
-| 模型 ID（客户端 `model` 字段原样填这个） | 用途 | 出口 |
-|---|---|---|
-| `Z.ai/glm-5.3-flash` | 对话 | 智谱 GLM |
-| `openrouter/minimax/minimax-m3` | 对话 | OpenRouter → MiniMax |
-| `openrouter/minimax/minimax-m3.1-flash` | 对话 | OpenRouter → MiniMax |
-| `Local_Bifrost/AI_MAX/qwen3-embedding` | `/v1/embeddings` | 本地 AMD AI MAX（llama.cpp） |
-| `Local_Bifrost/AI_MAX/qwen3-reranker` | `/v1/rerank` | 本地 AMD AI MAX（llama.cpp） |
+| 模型 ID（客户端 `model` 字段原样填这个）              | 用途               | 出口                       |
+| --------------------------------------- | ---------------- | ------------------------ |
+| `Z.ai/glm-5.3-flash`                    | 对话               | 智谱 GLM                   |
+| `openrouter/minimax/minimax-m3`         | 对话               | OpenRouter → MiniMax     |
+| `openrouter/minimax/minimax-m3.1-flash` | 对话               | OpenRouter → MiniMax     |
+| `Local_Bifrost/AI_MAX/qwen3-embedding`  | `/v1/embeddings` | 本地 AMD AI MAX（llama.cpp） |
+| `Local_Bifrost/AI_MAX/qwen3-reranker`   | `/v1/rerank`     | 本地 AMD AI MAX（llama.cpp） |
 
 模型列表随时可改，**改完立刻生效，不用重启、不用重新打包**。新增模型时直接在上面那一栏末尾追加 `,新模型ID`。
 
-> 这两个本地模型是从 Oracle 机器经 Bifrost 回源到你本地 AI MAX 的，网关本身只认识 Bifrost 一个出口；
+> 这两个本地模型是从 Oracle 机器经 Bifrost 回源到你本地 AI MAX 的，网关本身只认识 Bifrost 一个出口；  
 > 本地机器掉线时，这两个模型的请求会失败，但不影响 GLM / MiniMax。
 
 ### 5.3 Discord 门禁参数
 
 后台 → **系统设置 → 认证 → Discord**：
 
-| 字段 | 说明 |
-|---|---|
-| Guild ID | 服务器 ID。**留空则跳过门禁**，任何 Discord 账号都能登录 |
-| Guild ID | 服务器 ID。**留空则跳过门禁**，任何 Discord 账号都能登录 |
-| Required role IDs | **默认留空** = 只要是该服务器成员就放行。填了才按身份组收紧 |
-| Invite URL | **默认留空** = 拒绝时不给邀请链接。填了才在提示里附上 |
+| 字段                | 说明                                   |
+| ----------------- | ------------------------------------ |
+| Guild ID          | 服务器 ID。**留空则跳过门禁**，任何 Discord 账号都能登录 |
+| Guild ID          | 服务器 ID。**留空则跳过门禁**，任何 Discord 账号都能登录 |
+| Required role IDs | **默认留空** = 只要是该服务器成员就放行。填了才按身份组收紧    |
+| Invite URL        | **默认留空** = 拒绝时不给邀请链接。填了才在提示里附上       |
 
 判定结果缓存 60 秒，改完配置最多一分钟生效。
 
@@ -330,45 +381,46 @@ bash build.sh --image && docker compose -f docker-compose.yml up -d
 
 ### 登录相关
 
-| 现象 | 原因 | 处理 |
-|---|---|---|
-| Discord 页面报 `Invalid OAuth2 redirect_uri` | Discord 里登记的回调地址与网关的不一致 | 三处对齐：Discord Redirects、后台站点地址、浏览器地址栏域名。路径固定 `/oauth/discord` |
-| 回调后提示「仅限本社区 Discord 成员使用」 | 账号不在该服务器，或 Guild ID 填错 | 先确认 Guild ID 与日志里的 `guild=` 一致；再确认该账号已加入服务器 |
-| 提示「缺少访问所需的身份组」 | 配了 Required role IDs 但用户没有 | 默认不该出现（该字段默认留空）；要放开就清空 Required role IDs |
-| 日志出现 `missing scope` / 403 | Discord 应用少了 `guilds.members.read` | 重新走一次授权（用户需重新点登录，让 Discord 重新发 token） |
-| 改完门禁没生效 | 结果缓存 60 秒 | 等一分钟，或重启容器 |
-| 普通成员看到用户名密码框 | 社区模式没生效 | 确认 Discord 已启用（后台 OAuth 里 Enabled 打开） |
+| 现象                                        | 原因                                 | 处理                                                           |
+| ----------------------------------------- | ---------------------------------- | ------------------------------------------------------------ |
+| Discord 页面报 `Invalid OAuth2 redirect_uri` | Discord 里登记的回调地址与网关的不一致            | 三处对齐：Discord Redirects、后台站点地址、浏览器地址栏域名。路径固定 `/oauth/discord` |
+| 回调后提示「仅限本社区 Discord 成员使用」                 | 账号不在该服务器，或 Guild ID 填错             | 先确认 Guild ID 与日志里的 `guild=` 一致；再确认该账号已加入服务器                  |
+| 提示「缺少访问所需的身份组」                            | 配了 Required role IDs 但用户没有         | 默认不该出现（该字段默认留空）；要放开就清空 Required role IDs                     |
+| 日志出现 `missing scope` / 403                | Discord 应用少了 `guilds.members.read` | 重新走一次授权（用户需重新点登录，让 Discord 重新发 token）                        |
+| 改完门禁没生效                                   | 结果缓存 60 秒                          | 等一分钟，或重启容器                                                   |
+| 普通成员看到用户名密码框                              | 社区模式没生效                            | 确认 Discord 已启用（后台 OAuth 里 Enabled 打开）                        |
 
 ### 额度相关
 
-| 现象 | 原因 | 处理 |
-|---|---|---|
-| `MiniMax全站额度已用完（已用 x tokens / 上限 y tokens），将于 … 重置` | 该池这一小时打满 | 等重置，或后台调高该池额度（立即生效）；急用可换另一个池的模型 |
-| `You have reached the request limit: maximum 30 requests in 1 minutes` | 全站每分钟限流触发 | 降低并发；确认 `GLOBAL_RATE_LIMIT_PER_MINUTE` 的值 |
-| 两个额度框都显示「不限」 | 套餐里填了 0 | 后台把 MiniMax / GLM 池填回 30000000 / 3000000 |
-| 三个窗口都显示「不限」 | 额度填了 0 | 0 表示不限，这是预期行为 |
-| 额度改了但请求仍被拒 | 缓存/前端未刷新 | 窗口状态每次请求实时查库，改完立刻生效；页面 30 秒自动刷新 |
-| 用户显示「无有效套餐」 | 没有默认套餐或订阅过期 | 后台把某个套餐勾上 Grant automatically，让用户重新登录 |
+| 现象                                                                     | 原因          | 处理                                        |
+| ---------------------------------------------------------------------- | ----------- | ----------------------------------------- |
+| `MiniMax全站额度已用完（已用 x tokens / 上限 y tokens），将于 … 重置`                    | 该池这一小时打满    | 等重置，或后台调高该池额度（立即生效）；急用可换另一个池的模型           |
+| `You have reached the request limit: maximum 30 requests in 1 minutes` | 全站每分钟限流触发   | 降低并发；确认 `GLOBAL_RATE_LIMIT_PER_MINUTE` 的值 |
+| 两个额度框都显示「不限」                                                           | 套餐里填了 0     | 后台把 MiniMax / GLM 池填回 30000000 / 3000000  |
+| 三个窗口都显示「不限」                                                            | 额度填了 0      | 0 表示不限，这是预期行为                             |
+| 额度改了但请求仍被拒                                                             | 缓存/前端未刷新    | 窗口状态每次请求实时查库，改完立刻生效；页面 30 秒自动刷新           |
+| 用户显示「无有效套餐」                                                            | 没有默认套餐或订阅过期 | 后台把某个套餐勾上 Grant automatically，让用户重新登录     |
 
 ### 上游相关
 
-| 现象 | 原因 | 处理 |
-|---|---|---|
-| 请求返回 502 / 连接超时 | 网关到 Bifrost 不可达 | 容器内 `docker compose exec gateway wget -qO- $UPSTREAM_BASE_URL/models`；需要代理就在 `.env` 里设 `HTTP_PROXY` |
-| 401 / 403 | Bifrost 密钥错误或预算耗尽 | 用同一把密钥在宿主机 `curl -H "Authorization: Bearer sk-bf-..." $BASE/models` 复现 |
-| 404 `model_not_found` | 模型名写错，或 Base URL 带了 `/v1` | 模型名用 `provider/model`；Base URL 只填根地址 |
-| `Model xxx has not been priced by the administrator yet` | 自用模式被关掉了（向导默认开启） | 后台 → 运营设置 → 打开 **自用模式**；或给该模型配倍率 |
+| 现象                                                       | 原因                        | 处理                                                                                                  |
+| -------------------------------------------------------- | ------------------------- | --------------------------------------------------------------------------------------------------- |
+| 请求返回 502 / 连接超时                                          | 网关到 Bifrost 不可达           | 容器内 `docker compose exec gateway wget -qO- $UPSTREAM_BASE_URL/models`；需要代理就在 `.env` 里设 `HTTP_PROXY` |
+| 401 / 403                                                | Bifrost 密钥错误或预算耗尽         | 用同一把密钥在宿主机 `curl -H "Authorization: Bearer sk-bf-..." $BASE/models` 复现                              |
+| 404 `model_not_found`                                    | 模型名写错，或 Base URL 带了 `/v1` | 模型名用 `provider/model`；Base URL 只填根地址                                                                |
+| `Model xxx has not been priced by the administrator yet` | 自用模式被关掉了（向导默认开启）          | 后台 → 运营设置 → 打开 **自用模式**；或给该模型配倍率                                                                    |
 
 ### 系统相关
 
-| 现象 | 原因 | 处理 |
-|---|---|---|
+| 现象                                 | 原因                    | 处理                                                                                                                                                                                            |
+| ---------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `database is locked (SQLITE_BUSY)` | SQLite 只允许一个写者，并发写会撞锁 | 网关已默认开启 `busy_timeout=10s` + WAL + 连接池上限 8（启动日志会打印 `sqlite: journal_mode=wal busy_timeout=10000ms max_open_conns=8`）。偶发一两次会自动重试；**频繁出现说明并发已经超出 SQLite 的能力**，请设 `SQL_DSN` 换 MySQL 或 PostgreSQL |
-| 容器起不来，日志提示权限 | 数据卷属主不对 | 用命名卷 `community-gateway-data`，不要改成 root 拥有的 bind mount |
-| 从外网能直连 3000 端口 | 端口绑错 | `docker-compose.yml` 必须是 `127.0.0.1:3000:3000`，公网走隧道/反代 |
-| 日志警告 `TRUSTED_PROXIES is unset` | 未显式声明可信代理 | 本机反代默认已覆盖回环与内网段，可忽略；要收紧就设 `TRUSTED_PROXIES=none` |
+| 容器起不来，日志提示权限                       | 数据卷属主不对               | 用命名卷 `community-gateway-data`，不要改成 root 拥有的 bind mount                                                                                                                                        |
+| 从外网能直连 3000 端口                     | 端口绑错                  | `docker-compose.yml` 必须是 `127.0.0.1:3000:3000`，公网走隧道/反代                                                                                                                                       |
+| 日志警告 `TRUSTED_PROXIES is unset`    | 未显式声明可信代理             | 本机反代默认已覆盖回环与内网段，可忽略；要收紧就设 `TRUSTED_PROXIES=none`                                                                                                                                              |
 
 ---
+
 
 ## 八、安全清单
 
